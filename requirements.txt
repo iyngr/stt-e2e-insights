@@ -1,0 +1,10 @@
+google-cloud-storage>=2.10.0
+google-cloud-speech>=2.24.0
+google-cloud-dlp>=3.14.0
+google-cloud-contact-center-insights>=1.16.0
+pyyaml>=6.0
+asyncio>=3.4.3
+aiofiles>=23.2.0
+python-dotenv>=1.0.0
+structlog>=23.2.0
+tenacity>=8.2.3

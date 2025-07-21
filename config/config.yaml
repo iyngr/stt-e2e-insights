@@ -1,0 +1,61 @@
+# STT E2E Insights Configuration
+gcp:
+  project_id: "your-gcp-project-id"
+  service_account_key_path: "path/to/service-account-key.json"  # Optional if using default credentials
+
+# Google Cloud Storage Configuration
+gcs:
+  input_bucket: "your-input-bucket"
+  output_bucket: "your-output-bucket"
+  input_folder: "audio-files/"
+  output_folder: "processed-conversations/"
+  file_prefix_filter: "merged"  # Only process files starting with this prefix
+
+# Speech-to-Text Configuration
+stt:
+  language_code: "en-US"
+  sample_rate_hertz: 8000
+  encoding: "MULAW"
+  audio_channel_count: 2
+  enable_separate_recognition_per_channel: true
+  enable_speaker_diarization: true
+  diarization_speaker_count: 2
+  enable_automatic_punctuation: true
+  enable_word_confidence: true
+  enable_word_time_offsets: true
+  model: "telephony"
+  use_enhanced: true
+  profanity_filter: false
+  max_alternatives: 1
+  # Batch vs Streaming
+  processing_mode: "batch"  # Options: "batch", "streaming"
+  batch_timeout_seconds: 600
+
+# Data Loss Prevention (DLP) Configuration
+dlp:
+  location: "global"
+  identify_template_id: "your-identify-template-id"
+  deidentify_template_id: "your-deidentify-template-id"
+  # Context-aware inspection for better accuracy
+  include_quote: true
+  
+# Contact Center AI Insights Configuration
+ccai:
+  location: "us-central1"
+  conversation_ttl_days: 365
+  # Conversation metadata
+  agent_id: "agent-001"
+  customer_id: "customer-001"
+  
+# Processing Configuration
+processing:
+  max_concurrent_files: 5
+  retry_attempts: 3
+  retry_delay_seconds: 2
+  chunk_size_mb: 10  # For large file processing
+
+# Logging Configuration
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_path: "logs/stt_insights.log"
