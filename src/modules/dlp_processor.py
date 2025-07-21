@@ -8,9 +8,9 @@ from google.cloud import dlp_v2
 from google.cloud.dlp_v2 import DlpServiceClient, InspectTemplate, DeidentifyTemplate
 from google.cloud.dlp_v2.types import ContentItem, InspectConfig, DeidentifyConfig
 
-from ..utils.logger import LoggerMixin
-from ..utils.config_loader import get_config_section
-from ..utils.async_helpers import sync_to_async, async_retry
+from utils.logger import LoggerMixin
+from utils.config_loader import get_config_section
+from utils.async_helpers import sync_to_async, async_retry
 
 
 class DLPProcessor(LoggerMixin):

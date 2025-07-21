@@ -1,12 +1,12 @@
 # STT E2E Insights Configuration
 gcp:
-  project_id: "your-gcp-project-id"
+  project_id: ""
   service_account_key_path: "path/to/service-account-key.json"  # Optional if using default credentials
 
 # Google Cloud Storage Configuration
 gcs:
-  input_bucket: "your-input-bucket"
-  output_bucket: "your-output-bucket"
+  input_bucket: "pg-transcript"
+  output_bucket: "pg-transcript"
   input_folder: "audio-files/"
   output_folder: "processed-conversations/"
   file_prefix_filter: "merged"  # Only process files starting with this prefix
@@ -15,7 +15,7 @@ gcs:
 stt:
   language_code: "en-US"
   sample_rate_hertz: 8000
-  encoding: "MULAW"
+  encoding: "LINEAR16"
   audio_channel_count: 2
   enable_separate_recognition_per_channel: true
   enable_speaker_diarization: true
@@ -33,9 +33,9 @@ stt:
 
 # Data Loss Prevention (DLP) Configuration
 dlp:
-  location: "global"
-  identify_template_id: "your-identify-template-id"
-  deidentify_template_id: "your-deidentify-template-id"
+  location: "us-central1"
+  identify_template_id: "projects/trans-market-458313-u3/locations/us-central1/inspectTemplates/identify"
+  deidentify_template_id: "projects/trans-market-458313-u3/locations/us-central1/deidentifyTemplates/deidentify"
   # Context-aware inspection for better accuracy
   include_quote: true
   

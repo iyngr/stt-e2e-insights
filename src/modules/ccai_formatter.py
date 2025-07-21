@@ -5,8 +5,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 import uuid
 
-from ..utils.logger import LoggerMixin
-from ..utils.config_loader import get_config_section
+from utils.logger import LoggerMixin
+from utils.config_loader import get_config_section
 
 
 class CCAIFormatter(LoggerMixin):

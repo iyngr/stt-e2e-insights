@@ -8,9 +8,9 @@ from google.cloud import contact_center_insights_v1
 from google.cloud.contact_center_insights_v1 import ContactCenterInsightsClient
 from google.cloud.contact_center_insights_v1.types import Conversation, IngestConversationsRequest
 
-from ..utils.logger import LoggerMixin
-from ..utils.config_loader import get_config_section
-from ..utils.async_helpers import sync_to_async, async_retry, AsyncTaskManager
+from utils.logger import LoggerMixin
+from utils.config_loader import get_config_section
+from utils.async_helpers import sync_to_async, async_retry, AsyncTaskManager
 
 
 class CCAIUploader(LoggerMixin):

@@ -9,9 +9,9 @@ from google.cloud import speech
 from google.cloud.speech import SpeechClient, RecognitionConfig, RecognitionAudio
 from google.cloud.speech import SpeakerDiarizationConfig
 
-from ..utils.logger import LoggerMixin
-from ..utils.config_loader import get_config_section
-from ..utils.async_helpers import sync_to_async, async_retry
+from utils.logger import LoggerMixin
+from utils.config_loader import get_config_section
+from utils.async_helpers import sync_to_async, async_retry
 
 
 class STTProcessor(LoggerMixin):
