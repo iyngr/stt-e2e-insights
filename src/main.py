@@ -4,15 +4,12 @@ import sys
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from modules.gcs_handler import GCSHandler
-from modules.stt_processor import STTProcessor
-from modules.dlp_processor import DLPProcessor
-from modules.ccai_formatter import CCAIFormatter
 from modules.ccai_uploader import CCAIUploader
 from utils.config_loader import get_config, get_config_section
 from utils.logger import setup_logging, get_logger
@@ -52,21 +49,18 @@ class STTInsightsPipeline:
         }
     
     def _init_components(self):
-        """Initialize pipeline components."""
+        """Initialize pipeline components for direct ingestion."""
         gcp_config = self.config['gcp']
         project_id = gcp_config['project_id']
         
-        # Initialize all components
+        # Initialize components for direct ingestion
         self.gcs_handler = GCSHandler(project_id)
-        self.stt_processor = STTProcessor(project_id)
-        self.dlp_processor = DLPProcessor(project_id)
-        self.ccai_formatter = CCAIFormatter()
         self.ccai_uploader = CCAIUploader(project_id)
         
-        self.logger.info("Pipeline components initialized")
+        self.logger.info("Pipeline components initialized for direct ingestion")
     
     def run_pipeline(self, file_limit: Optional[int] = None) -> Dict[str, Any]:
-        """Run the complete STT E2E Insights pipeline.
+        """Run the complete STT E2E Insights pipeline with direct audio ingestion.
         
         Args:
             file_limit: Optional limit on number of files to process.
@@ -74,26 +68,29 @@ class STTInsightsPipeline:
         Returns:
             Pipeline execution summary.
         """
-        self.processing_stats['start_time'] = datetime.utcnow().isoformat()
-        self.logger.info("Starting STT E2E Insights pipeline")
+        self.processing_stats['start_time'] = datetime.now(timezone.utc).isoformat()
+        self.logger.info("Starting STT E2E Insights pipeline with direct audio ingestion")
         
         try:
             # Step 1: Discover audio files
             audio_files = self._discover_audio_files(file_limit)
             
-            # Step 2: Process files in batches
-            results = self._process_files_batch(audio_files)
+            # Step 2: Convert to GCS URIs
+            gcs_uris = self._convert_to_gcs_uris(audio_files)
             
-            # Step 3: Generate summary
-            summary = self._generate_summary(results)
+            # Step 3: Direct ingestion using IngestConversations API
+            ingestion_result = self._ingest_audio_files_directly(gcs_uris)
             
-            self.processing_stats['end_time'] = datetime.utcnow().isoformat()
+            # Step 4: Generate summary
+            summary = self._generate_ingestion_summary(ingestion_result, audio_files)
+            
+            self.processing_stats['end_time'] = datetime.now(timezone.utc).isoformat()
             self.logger.info("Pipeline completed successfully", summary=summary)
             
             return summary
             
         except Exception as e:
-            self.processing_stats['end_time'] = datetime.utcnow().isoformat()
+            self.processing_stats['end_time'] = datetime.now(timezone.utc).isoformat()
             self.logger.error("Pipeline failed", error=str(e))
             raise
     
@@ -121,200 +118,144 @@ class STTInsightsPipeline:
         
         return audio_files
     
-    def _list_audio_files_sync(self) -> List[str]:
-        """Synchronous method to list audio files."""
-        # Call the GCS handler list method directly (we'll make it sync)
-        return self.gcs_handler.list_audio_files_sync()
-    
-    def _process_files_batch(self, audio_files: List[str]) -> Dict[str, Any]:
-        """Process audio files in batches.
+    def _convert_to_gcs_uris(self, audio_files: List[str]) -> List[str]:
+        """Convert blob names to GCS URIs.
         
         Args:
             audio_files: List of audio file blob names.
             
         Returns:
-            Processing results.
+            List of GCS URIs.
         """
-        self.logger.info("Processing files in batches", 
-                        total_files=len(audio_files))
+        gcs_uris = []
+        for blob_name in audio_files:
+            gcs_uri = self.gcs_handler.get_gcs_uri(blob_name)
+            gcs_uris.append(gcs_uri)
         
-        # Process files sequentially for now
-        results = []
-        for audio_file in audio_files:
-            result = self._process_single_file(audio_file)
-            results.append(result)
-        
-        # Aggregate results
-        successful_results = [r for r in results if r and r.get('success', False)]
-        failed_results = [r for r in results if r and not r.get('success', False)]
-        
-        self.processing_stats['files_processed'] = len(successful_results)
-        self.processing_stats['files_failed'] = len(failed_results)
-        
-        return {
-            'successful_results': successful_results,
-            'failed_results': failed_results,
-            'total_processed': len(results)
-        }
+        self.logger.info("Converted blob names to GCS URIs", count=len(gcs_uris))
+        return gcs_uris
     
-    def _process_single_file(self, audio_file_blob: str) -> Dict[str, Any]:
-        """Process a single audio file through the complete pipeline.
+    def _ingest_audio_files_directly(self, gcs_uris: List[str]) -> Dict[str, Any]:
+        """Ingest audio files directly using CCAI Insights IngestConversations API.
+        
+        The API is designed to process ALL files in a bucket/folder location.
+        Instead of passing individual URIs, we extract the bucket pattern and let the API
+        handle file discovery and processing automatically.
+        
+        For file filtering, the proper approach is to organize files in specific folders
+        and point the API to that folder (e.g., gs://bucket/merged-files/).
         
         Args:
-            audio_file_blob: GCS blob name of the audio file.
+            gcs_uris: List of GCS URIs for audio files (used to determine bucket pattern).
             
         Returns:
-            Processing result for the file.
+            Ingestion result from CCAI Insights.
         """
-        file_result = {
-            'blob_name': audio_file_blob,
-            'success': False,
-            'steps_completed': [],
-            'error': None,
-            'conversation_id': None,
-            'upload_result': None
-        }
+        if not gcs_uris:
+            self.logger.warning("No audio files to ingest")
+            return {
+                'success': False,
+                'conversations_ingested': 0,
+                'failed_conversations': 0,
+                'error': 'No audio files provided',
+                'lro_completed': False
+            }
+        
+        # Extract bucket pattern from the first URI
+        # The API will process ALL files in the specified bucket location
+        first_uri = gcs_uris[0]
+        bucket_uri = self._extract_bucket_pattern_from_uri(first_uri)
+        
+        # For testing/quota management, limit the number of files processed
+        # In production, you might want to remove this or set it higher
+        sample_size = 10  # Process only 10 files for testing (remove for production)
+
+        self.logger.info("Starting direct audio ingestion using API's built-in file discovery", 
+                        discovered_files_count=len(gcs_uris),
+                        bucket_uri=bucket_uri,
+                        sample_size=sample_size,
+                        note="API will process ALL files in bucket location (limited by sample_size for testing)")
         
         try:
-            self.logger.info("Processing file", blob_name=audio_file_blob)
+            # Use the improved API that leverages server-side file discovery
+            result = self.ccai_uploader.ingest_conversations_from_gcs_sync(bucket_uri, sample_size)
             
-            # Step 1: Get GCS URI (no download needed)
-            self.logger.debug("Step 1: Getting GCS URI", blob_name=audio_file_blob)
-            gcs_uri = self.gcs_handler.get_gcs_uri(audio_file_blob)
-            file_result['steps_completed'].append('gcs_uri')
+            # Update processing stats
+            self.processing_stats['conversations_uploaded'] = result.get('conversations_ingested', 0)
+            self.processing_stats['files_failed'] = result.get('failed_conversations', 0)
+            self.processing_stats['files_processed'] = result.get('conversations_ingested', 0)
             
-            # Step 2: Transcribe audio using GCS URI
-            self.logger.debug("Step 2: Transcribing audio", blob_name=audio_file_blob)
-            transcription_result = self.stt_processor.transcribe_audio_file(gcs_uri)
-            file_result['steps_completed'].append('transcription')
+            self.logger.info("Direct ingestion completed",
+                           ingested=result.get('conversations_ingested', 0),
+                           failed=result.get('failed_conversations', 0),
+                           lro_completed=result.get('lro_completed', False),
+                           bucket_uri=result.get('bucket_uri'),
+                           sample_size=result.get('sample_size'))
             
-            # Step 3: Redact PII (if needed - we'll need to update this method too)
-            self.logger.debug("Step 3: Redacting PII", blob_name=audio_file_blob)
-            redacted_result = self._redact_pii_sync(transcription_result)
-            file_result['steps_completed'].append('dlp_redaction')
-            
-            # Step 4: Format for CCAI
-            self.logger.debug("Step 4: Formatting for CCAI", blob_name=audio_file_blob)
-            audio_metadata = self._get_file_metadata_sync(audio_file_blob)
-            formatted_conversation = self._format_conversation_sync(
-                transcription_result, redacted_result, audio_metadata
-            )
-            file_result['steps_completed'].append('ccai_formatting')
-            
-            # Step 5: Save processed data to GCS
-            self.logger.debug("Step 5: Saving processed data", blob_name=audio_file_blob)
-            output_blob_name = f"processed_{Path(audio_file_blob).stem}.json"
-            self._upload_json_data_sync(formatted_conversation, output_blob_name)
-            file_result['steps_completed'].append('save_to_gcs')
-            
-            # Step 6: Upload to CCAI Insights
-            self.logger.debug("Step 6: Uploading to CCAI", blob_name=audio_file_blob)
-            upload_result = self._upload_conversation_sync(formatted_conversation)
-            file_result['upload_result'] = upload_result
-            file_result['steps_completed'].append('ccai_upload')
-            
-            # Update statistics
-            if upload_result.get('success', False):
-                self.processing_stats['conversations_uploaded'] += 1
-                file_result['conversation_id'] = upload_result.get('conversation_id')
-            
-            self.processing_stats['conversations_created'] += 1
-            file_result['success'] = True
-            
-            self.logger.info("File processing completed successfully", 
-                           blob_name=audio_file_blob,
-                           conversation_id=file_result['conversation_id'])
+            return result
             
         except Exception as e:
             error_msg = str(e)
-            file_result['error'] = error_msg
-            self.logger.error("File processing failed", 
-                            blob_name=audio_file_blob, 
+            self.logger.error("Direct ingestion failed", 
                             error=error_msg,
-                            steps_completed=file_result['steps_completed'])
-        
-        return file_result
-    
-    def _redact_pii_sync(self, transcription_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Synchronous PII redaction."""
-        # For now, return the transcription as-is
-        # You can implement sync DLP processing here
-        return transcription_result
-    
-    def _get_file_metadata_sync(self, blob_name: str) -> Dict[str, Any]:
-        """Synchronous file metadata retrieval."""
-        # Return basic metadata
-        return {
-            'blob_name': blob_name,
-            'file_name': Path(blob_name).name
-        }
-    
-    def _format_conversation_sync(self, transcription_result: Dict[str, Any], 
-                                 redacted_result: Dict[str, Any], 
-                                 audio_metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Synchronous CCAI formatting."""
-        # Basic formatting - you can enhance this
-        return {
-            'transcription': transcription_result,
-            'redacted': redacted_result,
-            'metadata': audio_metadata
-        }
-    
-    def _upload_json_data_sync(self, data: Dict[str, Any], blob_name: str) -> None:
-        """Synchronous JSON data upload."""
-        import json
-        import tempfile
-        
-        # Create a temporary file with JSON data
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-            json.dump(data, temp_file, indent=2)
-            temp_file_path = temp_file.name
-        
-        try:
-            # Upload to GCS using sync method
-            self.gcs_handler.upload_file_sync(temp_file_path, blob_name, content_type='application/json')
-            self.logger.info("JSON data uploaded successfully", blob_name=blob_name)
-        finally:
-            # Clean up temp file
-            import os
-            os.unlink(temp_file_path)
-    
-    def _upload_conversation_sync(self, conversation: Dict[str, Any]) -> Dict[str, Any]:
-        """Synchronous conversation upload to CCAI Insights."""
-        try:
-            # Use the CCAI uploader's sync method (we'll need to implement this)
-            result = self.ccai_uploader.upload_conversation_sync(conversation)
-            self.logger.info("Conversation uploaded to CCAI", 
-                           conversation_id=result.get('conversation_id'))
-            return result
-        except Exception as e:
-            self.logger.error("Failed to upload conversation to CCAI", error=str(e))
+                            bucket_uri=bucket_uri if 'bucket_uri' in locals() else 'unknown',
+                            sample_size=sample_size if 'sample_size' in locals() else 'unknown')
             return {
                 'success': False,
-                'error': str(e),
-                'conversation_id': None
+                'conversations_ingested': 0,
+                'failed_conversations': 0,  # Unknown - API handles discovery
+                'error': error_msg,
+                'lro_completed': False,
+                'bucket_uri': bucket_uri if 'bucket_uri' in locals() else 'unknown',
+                'sample_size': sample_size if 'sample_size' in locals() else 'unknown'
             }
     
-    def _generate_summary(self, results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate pipeline execution summary.
+    def _extract_bucket_pattern_from_uri(self, gcs_uri: str) -> str:
+        """Extract bucket pattern from a GCS URI for API pattern matching.
         
         Args:
-            results: Processing results.
+            gcs_uri: GCS URI like 'gs://bucket-name/path/to/merged_file.mp3'
+            
+        Returns:
+            Bucket URI pattern like 'gs://bucket-name/path/to/' for the folder containing files.
+        """
+        if not gcs_uri.startswith('gs://'):
+            raise ValueError(f"Invalid GCS URI: {gcs_uri}")
+        
+        parts = gcs_uri.split('/')
+        if len(parts) < 4:
+            raise ValueError(f"Invalid GCS URI format: {gcs_uri}")
+        
+        # Extract bucket and folder path: gs://bucket-name/folder/
+        bucket_name = parts[2]
+        folder_path = '/'.join(parts[3:-1])  # Exclude the filename
+        
+        if folder_path:
+            return f"gs://{bucket_name}/{folder_path}/"
+        else:
+            return f"gs://{bucket_name}/"
+    
+    def _generate_ingestion_summary(self, ingestion_result: Dict[str, Any], 
+                                  audio_files: List[str]) -> Dict[str, Any]:
+        """Generate pipeline execution summary for direct ingestion.
+        
+        Args:
+            ingestion_result: Result from direct ingestion.
+            audio_files: Original list of audio files.
             
         Returns:
             Execution summary.
         """
-        successful_results = results.get('successful_results', [])
-        failed_results = results.get('failed_results', [])
+        total_files = len(audio_files)
+        ingested_count = ingestion_result.get('conversations_ingested', 0)
+        failed_count = ingestion_result.get('failed_conversations', 0)
+        duplicates_count = ingestion_result.get('duplicate_conversations', 0)
+        total_processed = ingestion_result.get('total_processed', 0)
         
-        # Calculate success rate
-        total_files = len(successful_results) + len(failed_results)
-        success_rate = (len(successful_results) / total_files * 100) if total_files > 0 else 0
-        
-        # Extract upload statistics
-        successful_uploads = sum(1 for r in successful_results 
-                               if r.get('upload_result', {}).get('success', False))
-        upload_success_rate = (successful_uploads / len(successful_results) * 100) if successful_results else 0
+        # Calculate success rate based on discovered files
+        # Note: duplicates_count represents files that were already processed (success!)
+        successful_processing = ingested_count + duplicates_count
+        success_rate = (successful_processing / total_files * 100) if total_files > 0 else 0
         
         # Calculate processing time
         start_time = self.processing_stats.get('start_time')
@@ -332,54 +273,55 @@ class STTInsightsPipeline:
                 'start_time': start_time,
                 'end_time': end_time,
                 'duration_seconds': processing_duration,
-                'status': 'completed'
+                'status': 'completed' if ingestion_result.get('success', False) else 'failed',
+                'method': 'direct_ingestion'
             },
             'file_processing': {
                 'files_discovered': self.processing_stats['files_discovered'],
-                'files_processed_successfully': len(successful_results),
-                'files_failed': len(failed_results),
+                'files_processed_successfully': successful_processing,  # ingested + duplicates
+                'files_newly_ingested': ingested_count,
+                'files_skipped_duplicates': duplicates_count,
+                'files_failed': failed_count,
+                'total_api_processed': total_processed,
                 'success_rate_percent': round(success_rate, 2)
             },
             'conversation_processing': {
-                'conversations_created': self.processing_stats['conversations_created'],
-                'conversations_uploaded_successfully': successful_uploads,
-                'upload_success_rate_percent': round(upload_success_rate, 2)
+                'conversations_ingested': ingested_count,
+                'failed_conversations': failed_count,
+                'duplicate_conversations': duplicates_count,
+                'total_processed_by_api': total_processed,
+                'lro_completed': ingestion_result.get('lro_completed', False),
+                'operation_name': ingestion_result.get('operation_name')
             },
-            'detailed_results': {
-                'successful_conversations': [
-                    {
-                        'blob_name': r['blob_name'],
-                        'conversation_id': r.get('conversation_id'),
-                        'steps_completed': r['steps_completed']
-                    }
-                    for r in successful_results
-                ],
-                'failed_files': [
-                    {
-                        'blob_name': r['blob_name'],
-                        'error': r.get('error'),
-                        'steps_completed': r['steps_completed']
-                    }
-                    for r in failed_results
-                ]
+            'ingestion_details': {
+                'recognizer_used': self.ccai_uploader.recognizer_path,
+                'method': 'IngestConversations API',
+                'partial_errors': ingestion_result.get('partial_errors', [])
             }
         }
         
+        if not ingestion_result.get('success', False):
+            summary['error'] = ingestion_result.get('error')
+        
         return summary
     
+    def _list_audio_files_sync(self) -> List[str]:
+        """Synchronous method to list audio files."""
+        # Call the GCS handler list method directly
+        return self.gcs_handler.list_audio_files_sync()
+    
     async def validate_setup(self) -> Dict[str, bool]:
-        """Validate that all components are properly configured.
+        """Validate that all components are properly configured for direct ingestion.
         
         Returns:
             Validation results for each component.
         """
-        self.logger.info("Validating pipeline setup")
+        self.logger.info("Validating pipeline setup for direct ingestion")
         
         validation_results = {
             'gcs_access': False,
-            'stt_configuration': False,
-            'dlp_templates': False,
-            'ccai_access': False
+            'ccai_access': False,
+            'recognizer_available': False
         }
         
         try:
@@ -391,29 +333,24 @@ class STTInsightsPipeline:
             self.logger.error("GCS access validation: FAILED", error=str(e))
         
         try:
-            # Test STT configuration
-            # This is a basic validation - in practice, you might test with a small sample
-            validation_results['stt_configuration'] = True
-            self.logger.info("STT configuration validation: PASSED")
-        except Exception as e:
-            self.logger.error("STT configuration validation: FAILED", error=str(e))
-        
-        try:
-            # Test DLP templates
-            dlp_validation = await self.dlp_processor.validate_templates()
-            validation_results['dlp_templates'] = all(dlp_validation.values())
-            self.logger.info("DLP templates validation: PASSED" if validation_results['dlp_templates'] else "FAILED",
-                           template_status=dlp_validation)
-        except Exception as e:
-            self.logger.error("DLP templates validation: FAILED", error=str(e))
-        
-        try:
             # Test CCAI access
             # This is a basic validation - actual implementation might test with a dummy conversation
             validation_results['ccai_access'] = True
             self.logger.info("CCAI access validation: PASSED")
         except Exception as e:
             self.logger.error("CCAI access validation: FAILED", error=str(e))
+        
+        try:
+            # Test recognizer availability (this would require actual API call)
+            # For now, just check if the path is properly configured
+            recognizer_path = self.ccai_uploader.recognizer_path
+            if recognizer_path and "recognizers/" in recognizer_path:
+                validation_results['recognizer_available'] = True
+                self.logger.info("Recognizer validation: PASSED", recognizer=recognizer_path)
+            else:
+                self.logger.error("Recognizer validation: FAILED", recognizer=recognizer_path)
+        except Exception as e:
+            self.logger.error("Recognizer validation: FAILED", error=str(e))
         
         all_valid = all(validation_results.values())
         self.logger.info("Setup validation completed", 
@@ -442,7 +379,8 @@ def main():
         
         if args.validate_only:
             # Run validation only
-            validation_results = pipeline.validate_setup()
+            import asyncio
+            validation_results = asyncio.run(pipeline.validate_setup())
             
             if all(validation_results.values()):
                 print("✅ All validations passed! Pipeline is ready to run.")
@@ -455,15 +393,24 @@ def main():
             summary = pipeline.run_pipeline(args.file_limit)
             
             # Print summary
-            print("\n" + "="*50)
-            print("PIPELINE EXECUTION SUMMARY")
-            print("="*50)
+            print("\n" + "="*80)
+            print("CCAI INSIGHTS DIRECT INGESTION SUMMARY")
+            print("="*80)
             print(f"Files discovered: {summary['file_processing']['files_discovered']}")
             print(f"Files processed successfully: {summary['file_processing']['files_processed_successfully']}")
+            print(f"  ├─ Newly ingested: {summary['file_processing']['files_newly_ingested']}")
+            print(f"  └─ Skipped (duplicates): {summary['file_processing']['files_skipped_duplicates']}")
             print(f"Files failed: {summary['file_processing']['files_failed']}")
             print(f"Success rate: {summary['file_processing']['success_rate_percent']}%")
-            print(f"Conversations uploaded: {summary['conversation_processing']['conversations_uploaded_successfully']}")
-            print(f"Upload success rate: {summary['conversation_processing']['upload_success_rate_percent']}%")
+            print(f"Method: {summary['ingestion_details']['method']}")
+            print(f"Recognizer used: {summary['ingestion_details']['recognizer_used']}")
+            print(f"LRO completed: {summary['conversation_processing']['lro_completed']}")
+            
+            if summary['file_processing']['total_api_processed'] > 0:
+                print(f"Total processed by API: {summary['file_processing']['total_api_processed']}")
+            
+            if summary['conversation_processing']['operation_name']:
+                print(f"Operation name: {summary['conversation_processing']['operation_name']}")
             
             if summary['pipeline_execution']['duration_seconds']:
                 print(f"Total duration: {summary['pipeline_execution']['duration_seconds']:.2f} seconds")

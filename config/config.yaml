@@ -1,6 +1,6 @@
 # STT E2E Insights Configuration
 gcp:
-  project_id: ""
+  # project_id will be obtained implicitly from GCP environment
   service_account_key_path: "path/to/service-account-key.json"  # Optional if using default credentials
 
 # Google Cloud Storage Configuration
@@ -11,40 +11,36 @@ gcs:
   output_folder: "processed-conversations/"
   file_prefix_filter: "merged"  # Only process files starting with this prefix
 
-# Speech-to-Text Configuration
-stt:
-  language_code: "en-US"
-  sample_rate_hertz: 8000
-  encoding: "LINEAR16"
-  audio_channel_count: 2
-  enable_separate_recognition_per_channel: true
-  enable_speaker_diarization: true
-  diarization_speaker_count: 2
-  enable_automatic_punctuation: true
-  enable_word_confidence: true
-  enable_word_time_offsets: true
-  model: "telephony"
-  use_enhanced: true
-  profanity_filter: false
-  max_alternatives: 1
-  # Batch vs Streaming
-  processing_mode: "batch"  # Options: "batch", "streaming"
-  batch_timeout_seconds: 600
-
 # Data Loss Prevention (DLP) Configuration
 dlp:
   location: "us-central1"
-  identify_template_id: "projects/trans-market-458313-u3/locations/us-central1/inspectTemplates/identify"
-  deidentify_template_id: "projects/trans-market-458313-u3/locations/us-central1/deidentifyTemplates/deidentify"
+  identify_template_id: "identify"  # Template name only, project will be auto-detected
+  deidentify_template_id: "deidentify"  # Template name only, project will be auto-detected
   # Context-aware inspection for better accuracy
   include_quote: true
   
 # Contact Center AI Insights Configuration
 ccai:
   location: "us-central1"
+  recognizer_id: "ccai-insights-recognizer"  # Recognizer name for direct audio ingestion
   conversation_ttl_days: 365
   # Conversation metadata
   agent_id: "agent-001"
+  
+  # Channel configuration for audio ingestion
+  # Standard convention: customer=1, agent=2 (modify if your setup differs)
+  customer_channel: 1
+  agent_channel: 2
+  
+  # Note: For IngestConversations API to work, you need:
+  # 1. A Speech recognizer created in the same project/location
+  # 2. Project number (not project ID) in the recognizer path
+  # 3. Proper IAM permissions:
+  #    - contactcenterinsights.conversations.create
+  #    - contactcenterinsights.conversations.ingest
+  #    - storage.objects.get
+  #    - storage.objects.list
+  # 4. The recognizer must be in ACTIVE state
   customer_id: "customer-001"
   
 # Processing Configuration
