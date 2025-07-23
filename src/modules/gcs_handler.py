@@ -84,6 +84,49 @@ class GCSHandler(LoggerMixin):
         self.logger.info("Found matching audio files", count=len(matching_files))
         return matching_files
     
+    def get_gcs_uri(self, blob_name: str) -> str:
+        """Get the GCS URI for a blob.
+        
+        Args:
+            blob_name: Name of the blob in GCS.
+            
+        Returns:
+            GCS URI (gs://bucket/path/to/file).
+        """
+        return f"gs://{self.input_bucket_name}/{blob_name}"
+    
+    def list_audio_files_sync(self) -> List[str]:
+        """List audio files synchronously.
+        
+        Returns:
+            List of GCS blob names (file paths) that match the criteria.
+        """
+        self.logger.info("Listing audio files",
+                        bucket=self.input_bucket_name,
+                        folder=self.input_folder,
+                        prefix_filter=self.file_prefix_filter)
+        
+        # Use synchronous operation
+        blobs = list(self.input_bucket.list_blobs(prefix=self.input_folder))
+        
+        # Filter blobs based on prefix and ensure they are audio files
+        audio_extensions = {'.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.au', '.raw'}
+        matching_files = []
+        
+        for blob in blobs:
+            blob_name = blob.name
+            file_name = Path(blob_name).name
+            file_extension = Path(blob_name).suffix.lower()
+            
+            # Check if file matches our criteria
+            if (file_name.startswith(self.file_prefix_filter) and 
+                file_extension in audio_extensions and
+                not blob_name.endswith('/')):  # Exclude directories
+                matching_files.append(blob_name)
+        
+        self.logger.info("Found matching audio files", count=len(matching_files))
+        return matching_files
+    
     @async_retry(max_attempts=3, delay_seconds=2.0)
     async def download_file(self, blob_name: str, local_path: Optional[str] = None) -> str:
         """Download a file from GCS to local storage.
@@ -255,3 +298,40 @@ class GCSHandler(LoggerMixin):
         local_paths = await task_manager.run_tasks(download_tasks)
         
         return local_paths
+    
+    def upload_file_sync(self, local_path: str, blob_name: str, 
+                        content_type: Optional[str] = None) -> str:
+        """Upload a file from local storage to GCS synchronously.
+        
+        Args:
+            local_path: Local file path to upload.
+            blob_name: Name for the blob in GCS.
+            content_type: Content type for the blob.
+            
+        Returns:
+            GCS URI of the uploaded file.
+        """
+        self.logger.debug("Uploading file to GCS", 
+                         local_path=local_path, 
+                         blob_name=blob_name)
+        
+        # Add output folder prefix if specified
+        if self.output_folder:
+            blob_name = f"{self.output_folder.rstrip('/')}/{blob_name}"
+        
+        blob = self.output_bucket.blob(blob_name)
+        
+        if content_type:
+            blob.content_type = content_type
+        
+        # Upload the file synchronously
+        blob.upload_from_filename(local_path)
+        
+        gcs_uri = f"gs://{self.output_bucket_name}/{blob_name}"
+        
+        self.logger.info("File uploaded successfully",
+                        local_path=local_path,
+                        blob_name=blob_name,
+                        gcs_uri=gcs_uri)
+        
+        return gcs_uri

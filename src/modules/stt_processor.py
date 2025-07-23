@@ -1,6 +1,5 @@
 """Speech-to-Text processor for STT E2E Insights."""
 
-import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import io
@@ -11,7 +10,6 @@ from google.cloud.speech import SpeakerDiarizationConfig
 
 from utils.logger import LoggerMixin
 from utils.config_loader import get_config_section
-from utils.async_helpers import sync_to_async, async_retry
 
 
 class STTProcessor(LoggerMixin):
@@ -77,147 +75,54 @@ class STTProcessor(LoggerMixin):
         
         return config
     
-    @async_retry(max_attempts=3, delay_seconds=2.0)
-    async def transcribe_audio_file(self, audio_file_path: str) -> Dict[str, Any]:
-        """Transcribe an audio file using batch recognition.
+    def transcribe_audio_file(self, gcs_uri: str) -> Dict[str, Any]:
+        """Transcribe an audio file using long running recognition.
         
         Args:
-            audio_file_path: Path to the audio file to transcribe.
+            gcs_uri: GCS URI of the audio file to transcribe (e.g., gs://bucket/file.wav).
             
         Returns:
             Dictionary containing transcription results with metadata.
         """
-        self.logger.info("Starting audio transcription", file_path=audio_file_path)
+        self.logger.info("Starting audio transcription", gcs_uri=gcs_uri)
         
-        # Read audio file
-        with open(audio_file_path, 'rb') as audio_file:
-            audio_content = audio_file.read()
-        
-        # Create recognition audio object
-        audio = RecognitionAudio(content=audio_content)
+        # Create recognition audio object with GCS URI
+        audio = RecognitionAudio(uri=gcs_uri)
         
         # Create recognition config
         config = self._create_recognition_config()
         
-        # Perform transcription
-        if self.stt_config.get('processing_mode') == 'streaming':
-            response = await self._transcribe_streaming(audio_content, config)
-        else:
-            response = await self._transcribe_batch(audio, config)
+        # Perform long running transcription
+        self.logger.debug("Starting long running recognition operation")
+        operation = self.client.long_running_recognize(config=config, audio=audio)
+        
+        # Wait for the operation to complete
+        self.logger.info("Waiting for transcription to complete", gcs_uri=gcs_uri)
+        response = operation.result(timeout=600)  # 10 minute timeout
         
         # Process and format the response
-        result = self._process_transcription_response(response, audio_file_path)
+        result = self._process_transcription_response(response, gcs_uri)
         
         self.logger.info("Audio transcription completed",
-                        file_path=audio_file_path,
+                        gcs_uri=gcs_uri,
                         alternatives_count=len(result.get('alternatives', [])))
         
         return result
-    
-    async def _transcribe_batch(self, audio: RecognitionAudio, 
-                               config: RecognitionConfig) -> Any:
-        """Perform batch transcription.
-        
-        Args:
-            audio: RecognitionAudio object.
-            config: RecognitionConfig object.
-            
-        Returns:
-            Recognition response.
-        """
-        self.logger.debug("Performing batch transcription")
-        
-        # Use sync_to_async for the blocking API call
-        response = await sync_to_async(self.client.recognize)(
-            config=config, audio=audio
-        )
-        
-        return response
-    
-    async def _transcribe_streaming(self, audio_content: bytes, 
-                                   config: RecognitionConfig) -> Any:
-        """Perform streaming transcription.
-        
-        Args:
-            audio_content: Audio data as bytes.
-            config: RecognitionConfig object.
-            
-        Returns:
-            Recognition response.
-        """
-        self.logger.debug("Performing streaming transcription")
-        
-        # For streaming, we need to simulate the streaming process
-        # In a real implementation, this would handle live audio streams
-        
-        def audio_generator():
-            """Generate audio chunks for streaming."""
-            chunk_size = 4096  # 4KB chunks
-            for i in range(0, len(audio_content), chunk_size):
-                yield speech.StreamingRecognizeRequest(
-                    audio_content=audio_content[i:i + chunk_size]
-                )
-        
-        # Create streaming config
-        streaming_config = speech.StreamingRecognitionConfig(
-            config=config,
-            interim_results=False
-        )
-        
-        # Create the initial request
-        initial_request = speech.StreamingRecognizeRequest(
-            streaming_config=streaming_config
-        )
-        
-        # Combine initial request with audio chunks
-        requests = [initial_request] + list(audio_generator())
-        
-        # Perform streaming recognition
-        responses = await sync_to_async(list)(
-            self.client.streaming_recognize(iter(requests))
-        )
-        
-        # Convert streaming responses to standard response format
-        return self._convert_streaming_response(responses)
-    
-    def _convert_streaming_response(self, streaming_responses: List[Any]) -> Any:
-        """Convert streaming responses to standard response format.
-        
-        Args:
-            streaming_responses: List of streaming responses.
-            
-        Returns:
-            Standard recognition response format.
-        """
-        # Create a mock response object that mimics the batch response structure
-        class MockResponse:
-            def __init__(self):
-                self.results = []
-        
-        response = MockResponse()
-        
-        for stream_response in streaming_responses:
-            if hasattr(stream_response, 'results'):
-                for result in stream_response.results:
-                    if result.is_final:
-                        response.results.append(result)
-        
-        return response
-    
+
     def _process_transcription_response(self, response: Any, 
-                                      file_path: str) -> Dict[str, Any]:
+                                      gcs_uri: str) -> Dict[str, Any]:
         """Process and format the transcription response.
         
         Args:
             response: Recognition response from the API.
-            file_path: Original audio file path.
+            gcs_uri: Original GCS URI of the audio file.
             
         Returns:
             Formatted transcription result.
         """
         result = {
-            'file_path': file_path,
-            'file_name': Path(file_path).name,
+            'gcs_uri': gcs_uri,
+            'file_name': Path(gcs_uri).name,
             'alternatives': [],
             'channels': {},
             'speakers': {},
@@ -321,30 +226,27 @@ class STTProcessor(LoggerMixin):
         
         return result
     
-    async def batch_transcribe_files(self, file_paths: List[str]) -> List[Dict[str, Any]]:
-        """Transcribe multiple audio files concurrently.
+    def batch_transcribe_files(self, gcs_uris: List[str]) -> List[Dict[str, Any]]:
+        """Transcribe multiple audio files.
         
         Args:
-            file_paths: List of audio file paths to transcribe.
+            gcs_uris: List of GCS URIs to transcribe.
             
         Returns:
             List of transcription results.
         """
-        from ..utils.async_helpers import AsyncTaskManager
-        
-        processing_config = get_config_section('processing')
-        max_concurrent = processing_config.get('max_concurrent_files', 5)
-        
-        task_manager = AsyncTaskManager(max_concurrent_tasks=max_concurrent)
-        
-        # Create transcription tasks
-        transcription_tasks = [
-            self.transcribe_audio_file(file_path) for file_path in file_paths
-        ]
-        
-        # Execute transcriptions concurrently
-        results = await task_manager.run_tasks(transcription_tasks)
-        
+        results = []
+        for gcs_uri in gcs_uris:
+            try:
+                result = self.transcribe_audio_file(gcs_uri)
+                results.append(result)
+            except Exception as e:
+                self.logger.error("Failed to transcribe file", gcs_uri=gcs_uri, error=str(e))
+                results.append({
+                    'gcs_uri': gcs_uri,
+                    'error': str(e),
+                    'success': False
+                })
         return results
     
     def get_channel_transcript(self, transcription_result: Dict[str, Any], 
