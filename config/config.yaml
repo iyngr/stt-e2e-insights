@@ -1,6 +1,6 @@
 # STT E2E Insights Configuration
 gcp:
-  project_id: ""
+  project_id: "trans-market-458313-u3"
   service_account_key_path: "path/to/service-account-key.json"  # Optional if using default credentials
 
 # Google Cloud Storage Configuration
