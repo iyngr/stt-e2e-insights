@@ -46,6 +46,10 @@ ccai:
   # Conversation metadata
   agent_id: "agent-001"
   customer_id: "customer-001"
+  # CCAI Insights recognizer for direct audio ingestion
+  recognizer_id: "projects/315895523022/locations/us-central1/recognizers/ccai-insights-recognizer"
+  # Processing mode: "manual" (current STT->DLP->CCAI flow) or "direct" (CCAI direct ingestion)
+  processing_mode: "direct"
   
 # Processing Configuration
 processing:

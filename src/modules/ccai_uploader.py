@@ -568,3 +568,162 @@ class CCAIUploader(LoggerMixin):
             conversation.duration = duration
         
         return conversation
+    
+    def ingest_conversations_direct(self, audio_files: List[str]) -> Dict[str, Any]:
+        """Use IngestConversations API to directly ingest audio files with the recognizer.
+        
+        This method leverages CCAI Insights' built-in STT capabilities using the 
+        specified recognizer, eliminating the need for manual transcription processing.
+        
+        Args:
+            audio_files: List of GCS blob names for audio files to ingest.
+            
+        Returns:
+            Bulk ingest operation result.
+        """
+        self.logger.info("Starting direct audio ingestion with recognizer", 
+                        file_count=len(audio_files))
+        
+        try:
+            # Get recognizer configuration
+            recognizer_id = self.ccai_config.get('recognizer_id')
+            if not recognizer_id:
+                raise ValueError("Recognizer ID must be configured for direct ingestion")
+            
+            # Prepare conversation objects for each audio file
+            conversation_objects = []
+            for audio_file_blob in audio_files:
+                conversation = self._create_direct_conversation_object(audio_file_blob, recognizer_id)
+                conversation_objects.append(conversation)
+            
+            # Create ingest request
+            from google.cloud.contact_center_insights_v1.types import IngestConversationsRequest
+            
+            request = IngestConversationsRequest(
+                parent=self.parent,
+                conversations=conversation_objects
+            )
+            
+            # Perform bulk ingest
+            self.logger.info("Submitting ingest request", 
+                           conversations_count=len(conversation_objects),
+                           recognizer_id=recognizer_id)
+            
+            operation = self.client.ingest_conversations(request)
+            
+            # Wait for operation to complete
+            self.logger.info("Waiting for ingest operation to complete", 
+                           operation_name=operation.name)
+            
+            result = operation.result(timeout=600)  # 10 minute timeout
+            
+            # Extract statistics from the result
+            stats = result.ingest_conversations_stats if hasattr(result, 'ingest_conversations_stats') else None
+            
+            ingest_result = {
+                'success': True,
+                'operation_name': operation.name,
+                'conversations_ingested': len(audio_files),
+                'ingest_statistics': {
+                    'processed_conversations_count': stats.processed_conversations_count if stats else len(audio_files),
+                    'duplicated_conversations_count': stats.duplicated_conversations_count if stats else 0,
+                    'failed_conversations_count': stats.failed_conversations_count if stats else 0
+                },
+                'recognizer_id': recognizer_id,
+                'error': None
+            }
+            
+            self.logger.info("Direct ingestion completed successfully",
+                           operation_name=operation.name,
+                           conversations_count=len(audio_files),
+                           recognizer_id=recognizer_id)
+            
+            return ingest_result
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error("Direct ingestion failed", error=error_msg)
+            
+            return {
+                'success': False,
+                'operation_name': None,
+                'conversations_ingested': 0,
+                'ingest_statistics': None,
+                'recognizer_id': recognizer_id if 'recognizer_id' in locals() else None,
+                'error': error_msg
+            }
+    
+    def _create_direct_conversation_object(self, audio_file_blob: str, recognizer_id: str) -> 'contact_center_insights_v1.Conversation':
+        """Create a Conversation object for direct audio ingestion with recognizer.
+        
+        Args:
+            audio_file_blob: GCS blob name of the audio file.
+            recognizer_id: Full resource ID of the CCAI recognizer.
+            
+        Returns:
+            CCAI Conversation object configured for direct ingestion.
+        """
+        from google.cloud.contact_center_insights_v1.types import Conversation, ConversationDataSource
+        from google.protobuf.duration_pb2 import Duration
+        from datetime import datetime, timedelta
+        import uuid
+        
+        # Get GCS configuration to build the correct URI
+        try:
+            gcs_config = get_config_section('gcs')
+            input_bucket = gcs_config.get('input_bucket', 'default-bucket')
+        except:
+            input_bucket = 'default-bucket'
+        
+        gcs_uri = f"gs://{input_bucket}/{audio_file_blob}"
+        
+        # Create the conversation object
+        conversation = Conversation()
+        conversation.medium = Conversation.Medium.PHONE_CALL
+        conversation.language_code = "en-US"  # Can be made configurable
+        
+        # Set expiration time based on configuration
+        ttl_days = self.ccai_config.get('conversation_ttl_days', 365)
+        expire_time = datetime.utcnow() + timedelta(days=ttl_days)
+        
+        from google.protobuf.timestamp_pb2 import Timestamp
+        timestamp = Timestamp()
+        timestamp.FromDatetime(expire_time)
+        conversation.expire_time = timestamp
+        
+        # Create data source with GCS audio and recognizer
+        data_source = ConversationDataSource()
+        gcs_source = ConversationDataSource.GcsSource()
+        gcs_source.audio_uri = gcs_uri
+        data_source.gcs_source = gcs_source
+        
+        # Set the recognizer for STT processing
+        # According to the CCAI API docs, the recognizer is set at the conversation level
+        # or in the data source configuration for transcription
+        if hasattr(data_source.gcs_source, 'recognizer_name'):
+            data_source.gcs_source.recognizer_name = recognizer_id
+        elif hasattr(conversation, 'recognizer_name'):
+            conversation.recognizer_name = recognizer_id
+        
+        conversation.data_source = data_source
+        
+        # Add call metadata
+        call_metadata = Conversation.CallMetadata()
+        call_metadata.customer_channel = 1  # Assuming customer is on channel 1
+        call_metadata.agent_channel = 2     # Assuming agent is on channel 2
+        call_metadata.agent_id = self.ccai_config.get('agent_id', 'agent-001')
+        call_metadata.customer_id = self.ccai_config.get('customer_id', 'customer-001')
+        conversation.call_metadata = call_metadata
+        
+        # Generate a unique conversation ID based on the file name
+        from pathlib import Path
+        base_name = Path(audio_file_blob).stem
+        conversation_id = f"direct-ingest-{base_name}-{uuid.uuid4().hex[:8]}"
+        
+        self.logger.debug("Created direct conversation object", 
+                         audio_file=audio_file_blob,
+                         gcs_uri=gcs_uri,
+                         conversation_id=conversation_id,
+                         recognizer_id=recognizer_id)
+        
+        return conversation

@@ -65,11 +65,12 @@ class STTInsightsPipeline:
         
         self.logger.info("Pipeline components initialized")
     
-    def run_pipeline(self, file_limit: Optional[int] = None) -> Dict[str, Any]:
+    def run_pipeline(self, file_limit: Optional[int] = None, processing_mode: Optional[str] = None) -> Dict[str, Any]:
         """Run the complete STT E2E Insights pipeline.
         
         Args:
             file_limit: Optional limit on number of files to process.
+            processing_mode: Override the processing mode ("manual" or "direct").
             
         Returns:
             Pipeline execution summary.
@@ -78,14 +79,23 @@ class STTInsightsPipeline:
         self.logger.info("Starting STT E2E Insights pipeline")
         
         try:
+            # Determine processing mode
+            ccai_config = self.config['ccai']
+            mode = processing_mode or ccai_config.get('processing_mode', 'manual')
+            
+            self.logger.info("Pipeline processing mode", mode=mode)
+            
             # Step 1: Discover audio files
             audio_files = self._discover_audio_files(file_limit)
             
-            # Step 2: Process files in batches
-            results = self._process_files_batch(audio_files)
+            # Step 2: Process files based on mode
+            if mode == 'direct':
+                results = self._process_files_direct_ingestion(audio_files)
+            else:
+                results = self._process_files_batch(audio_files)
             
             # Step 3: Generate summary
-            summary = self._generate_summary(results)
+            summary = self._generate_summary(results, mode)
             
             self.processing_stats['end_time'] = datetime.utcnow().isoformat()
             self.logger.info("Pipeline completed successfully", summary=summary)
@@ -156,6 +166,93 @@ class STTInsightsPipeline:
             'failed_results': failed_results,
             'total_processed': len(results)
         }
+    
+    def _process_files_direct_ingestion(self, audio_files: List[str]) -> Dict[str, Any]:
+        """Process audio files using direct CCAI Insights ingestion.
+        
+        This method uses the IngestConversations API to upload audio files directly
+        to CCAI Insights, letting CCAI handle STT transcription automatically.
+        
+        Args:
+            audio_files: List of audio file blob names.
+            
+        Returns:
+            Processing results.
+        """
+        self.logger.info("Processing files using direct CCAI ingestion", 
+                        total_files=len(audio_files))
+        
+        try:
+            # Use the CCAI uploader's direct ingestion method
+            ingest_result = self.ccai_uploader.ingest_conversations_direct(audio_files)
+            
+            if ingest_result['success']:
+                # Update stats
+                self.processing_stats['files_processed'] = ingest_result['conversations_ingested']
+                self.processing_stats['conversations_created'] = ingest_result['conversations_ingested']
+                self.processing_stats['conversations_uploaded'] = ingest_result['conversations_ingested']
+                
+                # Create successful results for each file
+                successful_results = []
+                for audio_file in audio_files:
+                    successful_results.append({
+                        'blob_name': audio_file,
+                        'success': True,
+                        'processing_mode': 'direct_ingestion',
+                        'conversation_id': f"direct-{Path(audio_file).stem}",
+                        'upload_result': {
+                            'success': True,
+                            'operation_name': ingest_result['operation_name']
+                        }
+                    })
+                
+                return {
+                    'successful_results': successful_results,
+                    'failed_results': [],
+                    'total_processed': len(audio_files),
+                    'ingest_result': ingest_result
+                }
+            else:
+                # All files failed
+                self.processing_stats['files_failed'] = len(audio_files)
+                
+                failed_results = []
+                for audio_file in audio_files:
+                    failed_results.append({
+                        'blob_name': audio_file,
+                        'success': False,
+                        'processing_mode': 'direct_ingestion',
+                        'error': ingest_result['error']
+                    })
+                
+                return {
+                    'successful_results': [],
+                    'failed_results': failed_results,
+                    'total_processed': len(audio_files),
+                    'ingest_result': ingest_result
+                }
+                
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error("Direct ingestion processing failed", error=error_msg)
+            
+            # Mark all files as failed
+            self.processing_stats['files_failed'] = len(audio_files)
+            
+            failed_results = []
+            for audio_file in audio_files:
+                failed_results.append({
+                    'blob_name': audio_file,
+                    'success': False,
+                    'processing_mode': 'direct_ingestion',
+                    'error': error_msg
+                })
+            
+            return {
+                'successful_results': [],
+                'failed_results': failed_results,
+                'total_processed': len(audio_files)
+            }
     
     def _process_single_file(self, audio_file_blob: str) -> Dict[str, Any]:
         """Process a single audio file through the complete pipeline.
@@ -295,11 +392,12 @@ class STTInsightsPipeline:
                 'conversation_id': None
             }
     
-    def _generate_summary(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def _generate_summary(self, results: Dict[str, Any], processing_mode: str = 'manual') -> Dict[str, Any]:
         """Generate pipeline execution summary.
         
         Args:
             results: Processing results.
+            processing_mode: The processing mode used ('manual' or 'direct').
             
         Returns:
             Execution summary.
@@ -332,7 +430,8 @@ class STTInsightsPipeline:
                 'start_time': start_time,
                 'end_time': end_time,
                 'duration_seconds': processing_duration,
-                'status': 'completed'
+                'status': 'completed',
+                'processing_mode': processing_mode
             },
             'file_processing': {
                 'files_discovered': self.processing_stats['files_discovered'],
@@ -350,7 +449,8 @@ class STTInsightsPipeline:
                     {
                         'blob_name': r['blob_name'],
                         'conversation_id': r.get('conversation_id'),
-                        'steps_completed': r['steps_completed']
+                        'steps_completed': r.get('steps_completed', []),
+                        'processing_mode': r.get('processing_mode', processing_mode)
                     }
                     for r in successful_results
                 ],
@@ -358,12 +458,22 @@ class STTInsightsPipeline:
                     {
                         'blob_name': r['blob_name'],
                         'error': r.get('error'),
-                        'steps_completed': r['steps_completed']
+                        'steps_completed': r.get('steps_completed', []),
+                        'processing_mode': r.get('processing_mode', processing_mode)
                     }
                     for r in failed_results
                 ]
             }
         }
+        
+        # Add additional info for direct ingestion mode
+        if processing_mode == 'direct' and 'ingest_result' in results:
+            ingest_result = results['ingest_result']
+            summary['direct_ingestion'] = {
+                'operation_name': ingest_result.get('operation_name'),
+                'recognizer_id': ingest_result.get('recognizer_id'),
+                'ingest_statistics': ingest_result.get('ingest_statistics')
+            }
         
         return summary
     
@@ -433,12 +543,20 @@ def main():
                        help='Only validate setup, do not run pipeline')
     parser.add_argument('--file-limit', type=int, 
                        help='Limit number of files to process')
+    parser.add_argument('--processing-mode', type=str, choices=['manual', 'direct'],
+                       help='Processing mode: manual (STT->DLP->CCAI) or direct (CCAI direct ingestion)')
+    parser.add_argument('--recognizer-id', type=str,
+                       help='Override recognizer ID for direct ingestion mode')
     
     args = parser.parse_args()
     
     try:
         # Initialize pipeline
         pipeline = STTInsightsPipeline(args.config)
+        
+        # Override recognizer ID if provided
+        if args.recognizer_id:
+            pipeline.config['ccai']['recognizer_id'] = args.recognizer_id
         
         if args.validate_only:
             # Run validation only
@@ -452,18 +570,25 @@ def main():
                 return 1
         else:
             # Run full pipeline
-            summary = pipeline.run_pipeline(args.file_limit)
+            summary = pipeline.run_pipeline(args.file_limit, args.processing_mode)
             
             # Print summary
             print("\n" + "="*50)
             print("PIPELINE EXECUTION SUMMARY")
             print("="*50)
+            print(f"Processing mode: {summary['pipeline_execution']['processing_mode']}")
             print(f"Files discovered: {summary['file_processing']['files_discovered']}")
             print(f"Files processed successfully: {summary['file_processing']['files_processed_successfully']}")
             print(f"Files failed: {summary['file_processing']['files_failed']}")
             print(f"Success rate: {summary['file_processing']['success_rate_percent']}%")
             print(f"Conversations uploaded: {summary['conversation_processing']['conversations_uploaded_successfully']}")
             print(f"Upload success rate: {summary['conversation_processing']['upload_success_rate_percent']}%")
+            
+            # Print additional info for direct ingestion
+            if summary['pipeline_execution']['processing_mode'] == 'direct' and 'direct_ingestion' in summary:
+                direct_info = summary['direct_ingestion']
+                print(f"Recognizer used: {direct_info.get('recognizer_id', 'N/A')}")
+                print(f"Operation name: {direct_info.get('operation_name', 'N/A')}")
             
             if summary['pipeline_execution']['duration_seconds']:
                 print(f"Total duration: {summary['pipeline_execution']['duration_seconds']:.2f} seconds")
