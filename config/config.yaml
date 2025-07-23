@@ -1,6 +1,6 @@
 # STT E2E Insights Configuration
 gcp:
-  project_id: ""
+  # project_id will be obtained implicitly from GCP environment
   service_account_key_path: "path/to/service-account-key.json"  # Optional if using default credentials
 
 # Google Cloud Storage Configuration
@@ -34,14 +34,15 @@ stt:
 # Data Loss Prevention (DLP) Configuration
 dlp:
   location: "us-central1"
-  identify_template_id: "projects/trans-market-458313-u3/locations/us-central1/inspectTemplates/identify"
-  deidentify_template_id: "projects/trans-market-458313-u3/locations/us-central1/deidentifyTemplates/deidentify"
+  identify_template_id: "identify"  # Template name only, project will be auto-detected
+  deidentify_template_id: "deidentify"  # Template name only, project will be auto-detected
   # Context-aware inspection for better accuracy
   include_quote: true
   
 # Contact Center AI Insights Configuration
 ccai:
   location: "us-central1"
+  recognizer_id: "ccai-insights-recognizer"  # Recognizer name for direct audio ingestion
   conversation_ttl_days: 365
   # Conversation metadata
   agent_id: "agent-001"

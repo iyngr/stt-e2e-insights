@@ -1,12 +1,16 @@
-"""CCAI Insights uploader for STT E2E Insights."""
+"""CCAI Insights uploader for STT E2E Insights with IngestConversations API support."""
 
 import asyncio
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from google.cloud import contact_center_insights_v1
 from google.cloud.contact_center_insights_v1 import ContactCenterInsightsClient
-from google.cloud.contact_center_insights_v1.types import Conversation, IngestConversationsRequest
+from google.cloud.contact_center_insights_v1.types import (
+    Conversation, 
+    IngestConversationsRequest,
+    IngestConversationsMetadata
+)
 
 from utils.logger import LoggerMixin
 from utils.config_loader import get_config_section
@@ -33,16 +37,19 @@ class CCAIUploader(LoggerMixin):
             raise ValueError("GCP project ID must be provided")
         
         self.location = self.ccai_config.get('location', 'us-central1')
+        self.recognizer_id = self.ccai_config.get('recognizer_id', 'ccai-insights-recognizer')
         
         # Initialize CCAI client
         self.client = ContactCenterInsightsClient()
         
-        # Build parent path
+        # Build parent path and recognizer path
         self.parent = f"projects/{self.project_id}/locations/{self.location}"
+        self.recognizer_path = f"{self.parent}/recognizers/{self.recognizer_id}"
         
         self.logger.info("CCAI uploader initialized",
                         project_id=self.project_id,
-                        location=self.location)
+                        location=self.location,
+                        recognizer_id=self.recognizer_id)
     
     @async_retry(max_attempts=3, delay_seconds=2.0)
     async def upload_conversation(self, conversation_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -410,7 +417,168 @@ class CCAIUploader(LoggerMixin):
         
         return results
     
-    async def ingest_conversations_bulk(self, conversations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def ingest_conversations_from_gcs(self, gcs_uris: List[str]) -> Dict[str, Any]:
+        """Use the IngestConversations API to directly ingest audio files from GCS.
+        
+        Args:
+            gcs_uris: List of GCS URIs for audio files to ingest.
+            
+        Returns:
+            Ingest operation result with LRO details.
+        """
+        self.logger.info("Starting direct audio ingestion from GCS", 
+                        count=len(gcs_uris),
+                        recognizer=self.recognizer_path)
+        
+        try:
+            # Prepare conversation objects for ingestion
+            conversations = []
+            for gcs_uri in gcs_uris:
+                conversation = self._create_conversation_for_ingestion(gcs_uri)
+                conversations.append(conversation)
+            
+            # Create ingest request
+            request = IngestConversationsRequest(
+                parent=self.parent,
+                conversations=conversations,
+                # Optional: specify recognizer for STT
+                conversation_config=self._create_conversation_config()
+            )
+            
+            # Start the ingestion operation
+            operation = await sync_to_async(self.client.ingest_conversations)(request)
+            
+            self.logger.info("Ingestion operation started", 
+                           operation_name=operation.name,
+                           conversations_count=len(conversations))
+            
+            # Wait for operation to complete with LRO monitoring
+            result = await self._monitor_ingestion_operation(operation)
+            
+            return result
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error("Failed to ingest conversations from GCS", error=error_msg)
+            
+            return {
+                'success': False,
+                'operation_name': None,
+                'conversations_ingested': 0,
+                'failed_conversations': len(gcs_uris),
+                'error': error_msg,
+                'lro_completed': False
+            }
+    
+    def _create_conversation_for_ingestion(self, gcs_uri: str) -> Conversation:
+        """Create a conversation object for direct ingestion from GCS.
+        
+        Args:
+            gcs_uri: GCS URI of the audio file.
+            
+        Returns:
+            Conversation object configured for ingestion.
+        """
+        conversation = Conversation()
+        conversation.medium = Conversation.Medium.PHONE_CALL
+        conversation.language_code = "en-US"
+        
+        # Set TTL (time to live)
+        ttl_days = self.ccai_config.get('conversation_ttl_days', 365)
+        expire_time = datetime.utcnow() + timedelta(days=ttl_days)
+        conversation.expire_time = expire_time
+        
+        # Create data source with GCS audio URI
+        data_source = Conversation.ConversationDataSource()
+        gcs_source = Conversation.ConversationDataSource.GcsSource()
+        gcs_source.audio_uri = gcs_uri
+        data_source.gcs_source = gcs_source
+        conversation.data_source = data_source
+        
+        # Add call metadata
+        call_metadata = Conversation.CallMetadata()
+        call_metadata.agent_id = self.ccai_config.get('agent_id', 'agent-001')
+        call_metadata.customer_id = self.ccai_config.get('customer_id', 'customer-001')
+        conversation.call_metadata = call_metadata
+        
+        return conversation
+    
+    def _create_conversation_config(self) -> Dict[str, Any]:
+        """Create conversation configuration for ingestion.
+        
+        Returns:
+            Configuration dictionary for the ingestion request.
+        """
+        return {
+            'speech_config': {
+                'speech_recognizer': self.recognizer_path
+            }
+        }
+    
+    async def _monitor_ingestion_operation(self, operation) -> Dict[str, Any]:
+        """Monitor the ingestion operation until completion.
+        
+        Args:
+            operation: The Long Running Operation from ingestion.
+            
+        Returns:
+            Operation result with completion status.
+        """
+        self.logger.info("Monitoring ingestion operation", operation_name=operation.name)
+        
+        try:
+            # Wait for operation to complete with timeout
+            timeout_seconds = 900  # 15 minutes
+            result = await sync_to_async(operation.result)(timeout=timeout_seconds)
+            
+            # Extract operation metadata
+            metadata = operation.metadata
+            if metadata:
+                ingest_metadata = IngestConversationsMetadata()
+                metadata.Unpack(ingest_metadata)
+                
+                ingest_result = {
+                    'success': True,
+                    'operation_name': operation.name,
+                    'conversations_ingested': len(ingest_metadata.processed_conversations),
+                    'failed_conversations': len(ingest_metadata.failed_conversations),
+                    'duplicate_conversations': len(ingest_metadata.duplicate_conversations),
+                    'partial_errors': list(ingest_metadata.partial_errors),
+                    'lro_completed': True,
+                    'error': None
+                }
+            else:
+                # Fallback if metadata is not available
+                ingest_result = {
+                    'success': True,
+                    'operation_name': operation.name,
+                    'conversations_ingested': 0,  # Would need to be determined another way
+                    'failed_conversations': 0,
+                    'lro_completed': True,
+                    'error': None
+                }
+            
+            self.logger.info("Ingestion operation completed successfully",
+                           operation_name=operation.name,
+                           conversations_ingested=ingest_result['conversations_ingested'],
+                           failed_conversations=ingest_result['failed_conversations'])
+            
+            return ingest_result
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error("Ingestion operation failed or timed out",
+                            operation_name=operation.name,
+                            error=error_msg)
+            
+            return {
+                'success': False,
+                'operation_name': operation.name,
+                'conversations_ingested': 0,
+                'failed_conversations': 0,
+                'lro_completed': False,
+                'error': error_msg
+            }
         """Use the IngestConversations API for bulk upload.
         
         Args:
@@ -486,7 +654,29 @@ class CCAIUploader(LoggerMixin):
         except Exception:
             return False
     
-    def upload_conversation_sync(self, conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    def ingest_conversations_from_gcs_sync(self, gcs_uris: List[str]) -> Dict[str, Any]:
+        """Synchronous version of GCS audio ingestion.
+        
+        Args:
+            gcs_uris: List of GCS URIs for audio files to ingest.
+            
+        Returns:
+            Ingest operation result.
+        """
+        try:
+            # Run the async version synchronously
+            return asyncio.run(self.ingest_conversations_from_gcs(gcs_uris))
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error("Synchronous ingestion failed", error=error_msg)
+            return {
+                'success': False,
+                'operation_name': None,
+                'conversations_ingested': 0,
+                'failed_conversations': len(gcs_uris),
+                'error': error_msg,
+                'lro_completed': False
+            }
         """Upload a single conversation to CCAI Insights synchronously.
         
         Args:

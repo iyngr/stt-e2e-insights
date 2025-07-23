@@ -2,8 +2,51 @@
 
 import os
 import yaml
-from typing import Dict, Any
+import subprocess
+from typing import Dict, Any, Optional
 from pathlib import Path
+
+
+def get_gcp_project_id() -> Optional[str]:
+    """Get the current GCP project ID implicitly.
+    
+    Returns:
+        Project ID string if available, None otherwise.
+    """
+    try:
+        # Try to get project ID from gcloud CLI
+        result = subprocess.run(
+            ['gcloud', 'config', 'get-value', 'project'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            project_id = result.stdout.strip()
+            if project_id != "(unset)":
+                return project_id
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    
+    # Try to get from environment variable
+    project_id = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
+    if project_id:
+        return project_id
+    
+    # Try to get from metadata service (when running on GCP)
+    try:
+        import requests
+        response = requests.get(
+            'http://metadata.google.internal/computeMetadata/v1/project/project-id',
+            headers={'Metadata-Flavor': 'Google'},
+            timeout=2
+        )
+        if response.status_code == 200:
+            return response.text
+    except:
+        pass
+    
+    return None
 
 
 class ConfigLoader:
@@ -39,6 +82,15 @@ class ConfigLoader:
         try:
             with open(self.config_path, 'r', encoding='utf-8') as file:
                 self._config = yaml.safe_load(file)
+            
+            # Auto-detect project ID if not provided
+            if 'gcp' in self._config and 'project_id' not in self._config['gcp']:
+                project_id = get_gcp_project_id()
+                if project_id:
+                    self._config['gcp']['project_id'] = project_id
+                else:
+                    raise ValueError("Could not detect GCP project ID. Please set GOOGLE_CLOUD_PROJECT environment variable or configure gcloud CLI.")
+            
             return self._config
         except yaml.YAMLError as e:
             raise yaml.YAMLError(f"Error parsing configuration file: {e}")
