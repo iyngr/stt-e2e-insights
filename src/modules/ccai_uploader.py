@@ -9,7 +9,9 @@ from google.cloud.contact_center_insights_v1 import ContactCenterInsightsClient
 from google.cloud.contact_center_insights_v1.types import (
     Conversation, 
     IngestConversationsRequest,
-    IngestConversationsMetadata
+    IngestConversationsMetadata,
+    ConversationDataSource,
+    GcsSource
 )
 
 from utils.logger import LoggerMixin
@@ -479,6 +481,8 @@ class CCAIUploader(LoggerMixin):
         Returns:
             Conversation object configured for ingestion.
         """
+        from google.cloud.contact_center_insights_v1.types import ConversationDataSource, GcsSource
+        
         conversation = Conversation()
         conversation.medium = Conversation.Medium.PHONE_CALL
         conversation.language_code = "en-US"
@@ -489,16 +493,16 @@ class CCAIUploader(LoggerMixin):
         conversation.expire_time = expire_time
         
         # Create data source with GCS audio URI
-        data_source = Conversation.ConversationDataSource()
-        gcs_source = Conversation.ConversationDataSource.GcsSource()
+        data_source = ConversationDataSource()
+        gcs_source = GcsSource()
         gcs_source.audio_uri = gcs_uri
         data_source.gcs_source = gcs_source
         conversation.data_source = data_source
         
         # Add call metadata
         call_metadata = Conversation.CallMetadata()
-        call_metadata.agent_id = self.ccai_config.get('agent_id', 'agent-001')
-        call_metadata.customer_id = self.ccai_config.get('customer_id', 'customer-001')
+        call_metadata.customer_channel = 1  # Channel 1 for customer
+        call_metadata.agent_channel = 2     # Channel 2 for agent
         conversation.call_metadata = call_metadata
         
         return conversation
