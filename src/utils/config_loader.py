@@ -179,7 +179,7 @@ def get_config_loader(config_path: str = None) -> ConfigLoader:
         _config_loader.substitute_env_vars()
         
         # Validate required sections
-        required_sections = ['gcp', 'gcs', 'stt', 'dlp', 'ccai', 'processing']
+        required_sections = ['gcp', 'gcs', 'dlp', 'ccai', 'processing']
         _config_loader.validate_required_sections(required_sections)
     
     return _config_loader

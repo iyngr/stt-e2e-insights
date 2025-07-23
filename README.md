@@ -4,28 +4,26 @@ A comprehensive end-to-end pipeline for processing speech-to-text (STT) audio fi
 
 ## Features
 
-- 🎵 **Audio Processing**: Ingests dual-channel 8,000 Hz Mulaw encoded audio files from Google Cloud Storage
-- 🗣️ **Speech-to-Text**: Uses Google Cloud Speech-to-Text API v2 with telephonic model for high-quality transcription
-- 🔒 **PII Redaction**: Implements Google Cloud Data Loss Prevention (DLP) API v2 for context-aware PII redaction
-- 📊 **CCAI Integration**: Formats and uploads conversations to Contact Center AI Insights
-- 🚀 **Async Processing**: Concurrent processing of multiple files for optimal performance
+- 🎵 **Direct Audio Ingestion**: Processes audio files directly through CCAI Insights IngestConversations API
+- 🗣️ **Built-in Speech Recognition**: Leverages CCAI's internal speech recognizer for high-quality transcription
+- 🔒 **Optional PII Redaction**: Supports DLP templates for sensitive data protection during ingestion
+- 📊 **CCAI Integration**: Seamless conversation upload to Contact Center AI Insights with proper metadata
+- 🚀 **Efficient Processing**: Bulk processing with built-in file discovery and duplicate handling
 - ⚙️ **Configurable**: YAML-based configuration for easy customization
 
 ## Architecture
 
-The pipeline consists of modular components:
+The pipeline uses direct audio ingestion with CCAI Insights:
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   GCS Handler   │    │  STT Processor   │    │  DLP Processor  │
-│   (Audio I/O)   │───▶│  (Transcription) │───▶│ (PII Redaction) │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                                         │
-┌─────────────────┐    ┌──────────────────┐             │
-│ CCAI Uploader   │◀───│ CCAI Formatter   │◀────────────┘
-│ (Insights API)  │    │ (Data Mapping)   │
-└─────────────────┘    └──────────────────┘
+┌─────────────────┐    ┌──────────────────┐
+│   GCS Handler   │    │ CCAI Uploader    │
+│   (Audio I/O)   │───▶│ (Direct Ingestion│
+└─────────────────┘    │  with Recognizer)│
+                       └──────────────────┘
 ```
+
+The CCAI Insights service handles STT processing internally using the configured recognizer, eliminating the need for separate transcription and formatting steps.
 
 ## Project Structure
 
@@ -37,10 +35,7 @@ stt-e2e-insights/
 │   ├── main.py                  # Main pipeline orchestrator
 │   ├── modules/                 # Core processing modules
 │   │   ├── gcs_handler.py       # Google Cloud Storage operations
-│   │   ├── stt_processor.py     # Speech-to-Text processing
-│   │   ├── dlp_processor.py     # Data Loss Prevention
-│   │   ├── ccai_formatter.py    # CCAI Insights formatting
-│   │   └── ccai_uploader.py     # CCAI Insights upload
+│   │   └── ccai_uploader.py     # CCAI Insights direct ingestion
 │   └── utils/                   # Utility modules
 │       ├── config_loader.py     # Configuration management
 │       ├── logger.py            # Structured logging
@@ -53,33 +48,37 @@ stt-e2e-insights/
 ## Prerequisites
 
 1. **Google Cloud Project** with the following APIs enabled:
+
    - Cloud Storage API
-   - Speech-to-Text API
-   - Data Loss Prevention API
    - Contact Center AI Insights API
+   - Data Loss Prevention API (optional, for PII redaction)
 
 2. **Authentication**: Set up Google Cloud credentials:
+
    ```bash
    gcloud auth application-default login
    # OR
    export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account-key.json"
    ```
 
-3. **DLP Templates**: Create DLP inspect and de-identify templates in your GCP project
+3. **CCAI Insights Speech Recognizer**: Create a speech recognizer in CCAI Insights for your project/location
 
-4. **GCS Buckets**: 
-   - Input bucket for audio files
-   - Output bucket for processed data
+4. **DLP Templates** (optional): Create DLP inspect and de-identify templates for PII redaction
+
+5. **GCS Buckets**:
+   - Input bucket containing audio files for ingestion
 
 ## Installation
 
 1. Clone the repository:
+
    ```bash
    git clone <repository-url>
    cd stt-e2e-insights
    ```
 
 2. Install dependencies:
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -141,15 +140,13 @@ python src/main.py --file-limit 10
 
 ### Pipeline Steps
 
-The pipeline processes each audio file through the following steps:
+The pipeline processes audio files through direct ingestion:
 
 1. **Discovery**: Lists audio files in GCS bucket with specified prefix
-2. **Download**: Downloads audio file to temporary local storage
-3. **Transcription**: Transcribes audio using Google Cloud STT API
-4. **PII Redaction**: Redacts sensitive information using DLP API
-5. **Formatting**: Formats data for CCAI Insights
-6. **Storage**: Saves processed data back to GCS
-7. **Upload**: Uploads conversation to CCAI Insights
+2. **Direct Ingestion**: Uses CCAI Insights IngestConversations API for bulk processing
+3. **Built-in Processing**: CCAI handles speech recognition, formatting, and storage internally
+4. **Optional DLP**: Applies redaction templates if configured
+5. **Monitoring**: Tracks ingestion operation and reports results
 
 ### Example Output
 
@@ -158,37 +155,40 @@ The pipeline processes each audio file through the following steps:
 PIPELINE EXECUTION SUMMARY
 ================================================================================
 Files discovered: 15
-Files processed successfully: 14
+Files newly ingested: 12
+Files skipped (duplicates): 2
 Files failed: 1
 Success rate: 93.33%
-Conversations uploaded: 14
-Upload success rate: 100.00%
-Total duration: 245.67 seconds
+Total processed by API: 14
+LRO completed: true
 ```
+
+Total duration: 245.67 seconds
+
+````
 
 ## Configuration Options
 
-### Speech-to-Text Settings
-
-```yaml
-stt:
-  language_code: "en-US"
-  sample_rate_hertz: 8000
-  encoding: "MULAW"
-  enable_speaker_diarization: true
-  enable_automatic_punctuation: true
-  model: "telephony"
-  processing_mode: "batch"  # or "streaming"
-```
-
-### DLP Settings
+### DLP Settings (Optional)
 
 ```yaml
 dlp:
-  location: "global"
+  location: "us-central1"
   identify_template_id: "your-template-id"
   deidentify_template_id: "your-template-id"
   include_quote: true
+````
+
+### CCAI Settings
+
+```yaml
+ccai:
+  location: "us-central1"
+  recognizer_id: "your-recognizer-name"
+  conversation_ttl_days: 365
+  agent_id: "agent-001"
+  customer_channel: 1
+  agent_channel: 2
 ```
 
 ### Processing Settings
@@ -222,17 +222,19 @@ The pipeline includes robust error handling:
 
 ## Performance Optimization
 
-- **Concurrent processing** of multiple files
-- **Batch operations** for efficient resource usage
-- **Async I/O** for non-blocking operations
+- **Direct ingestion** eliminates intermediate processing steps
+- **Bulk operations** for efficient resource usage
+- **Built-in file discovery** by CCAI API reduces overhead
 - **Configurable rate limiting** to respect API quotas
+- **Duplicate detection** prevents reprocessing of existing conversations
 
 ## Security Considerations
 
-- **PII redaction** using enterprise-grade DLP
+- **Optional PII redaction** using enterprise-grade DLP templates
 - **Secure credential management** via Google Cloud IAM
-- **Temporary file cleanup** to prevent data leakage
+- **Direct processing** eliminates temporary file storage
 - **Audit logging** for compliance requirements
+- **Project-based isolation** for multi-tenant deployments
 
 ## Troubleshooting
 
@@ -306,6 +308,7 @@ For questions and support:
 ## Changelog
 
 ### Version 1.0.0
+
 - Initial release
 - Complete STT E2E pipeline implementation
 - Support for dual-channel audio processing

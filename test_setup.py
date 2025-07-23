@@ -21,21 +21,18 @@ def test_imports():
         os.chdir(src_path)
         
         # Test utility imports
-        from utils.config_loader import ConfigLoader
-        from utils.logger import setup_logging, get_logger
-        from utils.async_helpers import AsyncTaskManager
+        from src.utils.config_loader import ConfigLoader
+        from src.utils.logger import setup_logging, get_logger
+        from src.utils.async_helpers import AsyncTaskManager
         print("  ✅ Utilities imported successfully")
         
         # Test module imports
-        from modules.gcs_handler import GCSHandler
-        from modules.stt_processor import STTProcessor
-        from modules.dlp_processor import DLPProcessor
-        from modules.ccai_formatter import CCAIFormatter
-        from modules.ccai_uploader import CCAIUploader
+        from src.modules.gcs_handler import GCSHandler
+        from src.modules.ccai_uploader import CCAIUploader
         print("  ✅ Modules imported successfully")
         
         # Test main import
-        from main import STTInsightsPipeline
+        from src.main import STTInsightsPipeline
         print("  ✅ Main pipeline imported successfully")
         
         # Change back to original directory
@@ -55,14 +52,14 @@ def test_config_loading():
     print("\n🔧 Testing configuration loading...")
     
     try:
-        from utils.config_loader import ConfigLoader
+        from src.utils.config_loader import ConfigLoader
         
         config_path = project_root / "config" / "config.yaml"
         config_loader = ConfigLoader(str(config_path))
         config = config_loader.load_config()
         
         # Validate required sections
-        required_sections = ['gcp', 'gcs', 'stt', 'dlp', 'ccai', 'processing']
+        required_sections = ['gcp', 'gcs', 'dlp', 'ccai', 'processing']
         missing_sections = [section for section in required_sections if section not in config]
         
         if missing_sections:
@@ -81,7 +78,7 @@ def test_logging_setup():
     print("\n📝 Testing logging setup...")
     
     try:
-        from utils.logger import setup_logging
+        from src.utils.logger import setup_logging
         
         # Override logging config for testing
         test_log_config = {
@@ -106,7 +103,6 @@ def test_dependencies():
     
     required_packages = [
         'google.cloud.storage',
-        'google.cloud.speech',
         'google.cloud.dlp_v2',
         'google.cloud.contact_center_insights_v1',
         'yaml',
@@ -141,9 +137,6 @@ def test_file_structure():
         "src/main.py",
         "src/modules/__init__.py",
         "src/modules/gcs_handler.py",
-        "src/modules/stt_processor.py",
-        "src/modules/dlp_processor.py",
-        "src/modules/ccai_formatter.py",
         "src/modules/ccai_uploader.py",
         "src/utils/__init__.py",
         "src/utils/config_loader.py",

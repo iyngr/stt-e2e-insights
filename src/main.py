@@ -4,17 +4,13 @@ import sys
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from modules.gcs_handler import GCSHandler
 from modules.ccai_uploader import CCAIUploader
-# Note: STT and DLP processors not needed for direct ingestion
-# from modules.stt_processor import STTProcessor  
-# from modules.dlp_processor import DLPProcessor
-# from modules.ccai_formatter import CCAIFormatter
 from utils.config_loader import get_config, get_config_section
 from utils.logger import setup_logging, get_logger
 
@@ -57,12 +53,9 @@ class STTInsightsPipeline:
         gcp_config = self.config['gcp']
         project_id = gcp_config['project_id']
         
-        # Initialize only necessary components for direct ingestion
+        # Initialize components for direct ingestion
         self.gcs_handler = GCSHandler(project_id)
         self.ccai_uploader = CCAIUploader(project_id)
-        
-        # Note: STT and DLP processors not needed for direct ingestion
-        # as CCAI Insights handles STT internally with the recognizer
         
         self.logger.info("Pipeline components initialized for direct ingestion")
     
@@ -75,7 +68,7 @@ class STTInsightsPipeline:
         Returns:
             Pipeline execution summary.
         """
-        self.processing_stats['start_time'] = datetime.utcnow().isoformat()
+        self.processing_stats['start_time'] = datetime.now(timezone.utc).isoformat()
         self.logger.info("Starting STT E2E Insights pipeline with direct audio ingestion")
         
         try:
@@ -91,13 +84,13 @@ class STTInsightsPipeline:
             # Step 4: Generate summary
             summary = self._generate_ingestion_summary(ingestion_result, audio_files)
             
-            self.processing_stats['end_time'] = datetime.utcnow().isoformat()
+            self.processing_stats['end_time'] = datetime.now(timezone.utc).isoformat()
             self.logger.info("Pipeline completed successfully", summary=summary)
             
             return summary
             
         except Exception as e:
-            self.processing_stats['end_time'] = datetime.utcnow().isoformat()
+            self.processing_stats['end_time'] = datetime.now(timezone.utc).isoformat()
             self.logger.error("Pipeline failed", error=str(e))
             raise
     
@@ -145,17 +138,47 @@ class STTInsightsPipeline:
     def _ingest_audio_files_directly(self, gcs_uris: List[str]) -> Dict[str, Any]:
         """Ingest audio files directly using CCAI Insights IngestConversations API.
         
+        The API is designed to process ALL files in a bucket/folder location.
+        Instead of passing individual URIs, we extract the bucket pattern and let the API
+        handle file discovery and processing automatically.
+        
+        For file filtering, the proper approach is to organize files in specific folders
+        and point the API to that folder (e.g., gs://bucket/merged-files/).
+        
         Args:
-            gcs_uris: List of GCS URIs for audio files.
+            gcs_uris: List of GCS URIs for audio files (used to determine bucket pattern).
             
         Returns:
             Ingestion result from CCAI Insights.
         """
-        self.logger.info("Starting direct audio ingestion", count=len(gcs_uris))
+        if not gcs_uris:
+            self.logger.warning("No audio files to ingest")
+            return {
+                'success': False,
+                'conversations_ingested': 0,
+                'failed_conversations': 0,
+                'error': 'No audio files provided',
+                'lro_completed': False
+            }
+        
+        # Extract bucket pattern from the first URI
+        # The API will process ALL files in the specified bucket location
+        first_uri = gcs_uris[0]
+        bucket_uri = self._extract_bucket_pattern_from_uri(first_uri)
+        
+        # For testing/quota management, limit the number of files processed
+        # In production, you might want to remove this or set it higher
+        sample_size = 10  # Process only 10 files for testing (remove for production)
+
+        self.logger.info("Starting direct audio ingestion using API's built-in file discovery", 
+                        discovered_files_count=len(gcs_uris),
+                        bucket_uri=bucket_uri,
+                        sample_size=sample_size,
+                        note="API will process ALL files in bucket location (limited by sample_size for testing)")
         
         try:
-            # Use the new direct ingestion method
-            result = self.ccai_uploader.ingest_conversations_from_gcs_sync(gcs_uris)
+            # Use the improved API that leverages server-side file discovery
+            result = self.ccai_uploader.ingest_conversations_from_gcs_sync(bucket_uri, sample_size)
             
             # Update processing stats
             self.processing_stats['conversations_uploaded'] = result.get('conversations_ingested', 0)
@@ -165,20 +188,52 @@ class STTInsightsPipeline:
             self.logger.info("Direct ingestion completed",
                            ingested=result.get('conversations_ingested', 0),
                            failed=result.get('failed_conversations', 0),
-                           lro_completed=result.get('lro_completed', False))
+                           lro_completed=result.get('lro_completed', False),
+                           bucket_uri=result.get('bucket_uri'),
+                           sample_size=result.get('sample_size'))
             
             return result
             
         except Exception as e:
             error_msg = str(e)
-            self.logger.error("Direct ingestion failed", error=error_msg)
+            self.logger.error("Direct ingestion failed", 
+                            error=error_msg,
+                            bucket_uri=bucket_uri if 'bucket_uri' in locals() else 'unknown',
+                            sample_size=sample_size if 'sample_size' in locals() else 'unknown')
             return {
                 'success': False,
                 'conversations_ingested': 0,
-                'failed_conversations': len(gcs_uris),
+                'failed_conversations': 0,  # Unknown - API handles discovery
                 'error': error_msg,
-                'lro_completed': False
+                'lro_completed': False,
+                'bucket_uri': bucket_uri if 'bucket_uri' in locals() else 'unknown',
+                'sample_size': sample_size if 'sample_size' in locals() else 'unknown'
             }
+    
+    def _extract_bucket_pattern_from_uri(self, gcs_uri: str) -> str:
+        """Extract bucket pattern from a GCS URI for API pattern matching.
+        
+        Args:
+            gcs_uri: GCS URI like 'gs://bucket-name/path/to/merged_file.mp3'
+            
+        Returns:
+            Bucket URI pattern like 'gs://bucket-name/path/to/' for the folder containing files.
+        """
+        if not gcs_uri.startswith('gs://'):
+            raise ValueError(f"Invalid GCS URI: {gcs_uri}")
+        
+        parts = gcs_uri.split('/')
+        if len(parts) < 4:
+            raise ValueError(f"Invalid GCS URI format: {gcs_uri}")
+        
+        # Extract bucket and folder path: gs://bucket-name/folder/
+        bucket_name = parts[2]
+        folder_path = '/'.join(parts[3:-1])  # Exclude the filename
+        
+        if folder_path:
+            return f"gs://{bucket_name}/{folder_path}/"
+        else:
+            return f"gs://{bucket_name}/"
     
     def _generate_ingestion_summary(self, ingestion_result: Dict[str, Any], 
                                   audio_files: List[str]) -> Dict[str, Any]:
@@ -194,9 +249,13 @@ class STTInsightsPipeline:
         total_files = len(audio_files)
         ingested_count = ingestion_result.get('conversations_ingested', 0)
         failed_count = ingestion_result.get('failed_conversations', 0)
+        duplicates_count = ingestion_result.get('duplicate_conversations', 0)
+        total_processed = ingestion_result.get('total_processed', 0)
         
-        # Calculate success rate
-        success_rate = (ingested_count / total_files * 100) if total_files > 0 else 0
+        # Calculate success rate based on discovered files
+        # Note: duplicates_count represents files that were already processed (success!)
+        successful_processing = ingested_count + duplicates_count
+        success_rate = (successful_processing / total_files * 100) if total_files > 0 else 0
         
         # Calculate processing time
         start_time = self.processing_stats.get('start_time')
@@ -219,14 +278,18 @@ class STTInsightsPipeline:
             },
             'file_processing': {
                 'files_discovered': self.processing_stats['files_discovered'],
-                'files_processed_successfully': ingested_count,
+                'files_processed_successfully': successful_processing,  # ingested + duplicates
+                'files_newly_ingested': ingested_count,
+                'files_skipped_duplicates': duplicates_count,
                 'files_failed': failed_count,
+                'total_api_processed': total_processed,
                 'success_rate_percent': round(success_rate, 2)
             },
             'conversation_processing': {
                 'conversations_ingested': ingested_count,
                 'failed_conversations': failed_count,
-                'duplicate_conversations': ingestion_result.get('duplicate_conversations', 0),
+                'duplicate_conversations': duplicates_count,
+                'total_processed_by_api': total_processed,
                 'lro_completed': ingestion_result.get('lro_completed', False),
                 'operation_name': ingestion_result.get('operation_name')
             },
@@ -316,7 +379,8 @@ def main():
         
         if args.validate_only:
             # Run validation only
-            validation_results = pipeline.validate_setup()
+            import asyncio
+            validation_results = asyncio.run(pipeline.validate_setup())
             
             if all(validation_results.values()):
                 print("✅ All validations passed! Pipeline is ready to run.")
@@ -333,18 +397,20 @@ def main():
             print("CCAI INSIGHTS DIRECT INGESTION SUMMARY")
             print("="*80)
             print(f"Files discovered: {summary['file_processing']['files_discovered']}")
-            print(f"Files ingested successfully: {summary['file_processing']['files_processed_successfully']}")
+            print(f"Files processed successfully: {summary['file_processing']['files_processed_successfully']}")
+            print(f"  ├─ Newly ingested: {summary['file_processing']['files_newly_ingested']}")
+            print(f"  └─ Skipped (duplicates): {summary['file_processing']['files_skipped_duplicates']}")
             print(f"Files failed: {summary['file_processing']['files_failed']}")
             print(f"Success rate: {summary['file_processing']['success_rate_percent']}%")
             print(f"Method: {summary['ingestion_details']['method']}")
             print(f"Recognizer used: {summary['ingestion_details']['recognizer_used']}")
             print(f"LRO completed: {summary['conversation_processing']['lro_completed']}")
             
+            if summary['file_processing']['total_api_processed'] > 0:
+                print(f"Total processed by API: {summary['file_processing']['total_api_processed']}")
+            
             if summary['conversation_processing']['operation_name']:
                 print(f"Operation name: {summary['conversation_processing']['operation_name']}")
-            
-            if summary['conversation_processing']['duplicate_conversations'] > 0:
-                print(f"Duplicate conversations: {summary['conversation_processing']['duplicate_conversations']}")
             
             if summary['pipeline_execution']['duration_seconds']:
                 print(f"Total duration: {summary['pipeline_execution']['duration_seconds']:.2f} seconds")
